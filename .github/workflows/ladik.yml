@@ -1,0 +1,47 @@
+name: Ladik Akilli Haber Takip
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"     # her 30 dakikada bir (degistirebilirsin)
+  workflow_dispatch:            # elle calistirma butonu (test icin)
+
+permissions:
+  contents: write               # gorulen_haberler.json'i geri yazabilmek icin
+
+concurrency:
+  group: ladik-haber
+  cancel-in-progress: false
+
+jobs:
+  tara:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Kutuphaneleri yukle
+        run: pip install feedparser requests
+
+      - name: Haberleri tara, suz ve gonder
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python ladik_haber_bot.py
+
+      - name: Kaydi guncelle
+        run: |
+          if [ -n "$(git status --porcelain gorulen_haberler.json)" ]; then
+            git config user.name "github-actions"
+            git config user.email "github-actions@github.com"
+            git add gorulen_haberler.json
+            git commit -m "Gorulen haberler guncellendi"
+            git push
+          else
+            echo "Degisiklik yok."
+          fi
