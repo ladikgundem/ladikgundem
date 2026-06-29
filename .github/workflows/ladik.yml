@@ -36,12 +36,21 @@ jobs:
 
       - name: Kaydi guncelle
         run: |
-          if [ -n "$(git status --porcelain gorulen_haberler.json)" ]; then
-            git config user.name "github-actions"
-            git config user.email "github-actions@github.com"
-            git add gorulen_haberler.json
-            git commit -m "Gorulen haberler guncellendi"
-            git push
-          else
-            echo "Degisiklik yok."
+          if [ -z "$(git status --porcelain gorulen_haberler.json)" ]; then
+            echo "Degisiklik yok, kaydetmeye gerek yok."
+            exit 0
           fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add gorulen_haberler.json
+          git commit -m "Gorulen haberler guncellendi"
+          for i in 1 2 3 4 5; do
+            if git pull --rebase --autostash origin main && git push; then
+              echo "Push basarili."
+              exit 0
+            fi
+            echo "Push denemesi $i basarisiz, tekrar deneniyor..."
+            sleep 5
+          done
+          echo "Push 5 denemede de basarisiz oldu."
+          exit 1
