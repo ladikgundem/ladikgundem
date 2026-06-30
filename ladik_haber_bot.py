@@ -3,15 +3,9 @@
 """
 Ladik (Samsun) Akilli Haber Botu
 --------------------------------
-Akis:
-  1) Google News + Bing News'i "Ladik" icin tarar
-  2) Tekrar haberleri eler (ayni olay = tek bildirim)
-  3) Gemini (ucretsiz) ile her haberin: alakasini, kategorisini,
-     onem puanini ve tek cumlelik ozetini cikarir
-  4) Sadece gercekten Ladik (Samsun) ile ilgili olanlari Telegram'a gonderir
-
-GitHub Actions tarafindan zamanli calistirilir; her calismada tek tur.
-Gizli bilgiler kodda DEGIL, GitHub Secrets icinde tutulur.
+Google News + Bing News'i "Ladik" icin tarar, SADECE SON GUNLERDEKI haberleri
+alir, tekrarlari eler, Gemini ile suzup ozetler, Telegram'a gonderir.
+GitHub Actions tarafindan zamanli calistirilir.
 """
 
 import os
@@ -20,6 +14,7 @@ import sys
 import json
 import html
 import time
+import calendar
 import difflib
 import hashlib
 
@@ -34,18 +29,25 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # ---- Ayarlar ----
 GEMINI_MODEL = "gemini-2.5-flash"
 
-# Iki bagimsiz kaynak: Google + Bing (genis ag)
 RSS_FEEDS = [
+    # Genel haber indeksleri (binlerce haber sitesini tarar)
     "https://news.google.com/rss/search?q=Ladik&hl=tr&gl=TR&ceid=TR:tr",
     "https://www.bing.com/news/search?q=Ladik&format=rss",
+    # Samsun yerel kaynak (tum Samsun gelir; Gemini Ladik'e daraltir) - dogrulandi
+    "https://www.samsunhaberajansi.com/rss.xml",
+    # internetsamsun: DOGRUDAN Ladik'e ozel besleme (sadece Ladik haberi)
+    "https://www.internetsamsun.com/samsun/ladik/sondakika.rss",
 ]
 
-# Sistemin odagi. Istersen burayi degistir (or. "Amasya'nin Ladik ilcesi").
 ODAK = "Samsun ilinin Ladik ilcesi"
 
+# ONEMLI: Sadece son bu kadar SAAT icinde yayimlanan haberler alinir.
+# Eski haber gelmesini engelleyen ayar budur. Istersen 24 yap (daha sıkı).
+MAX_YAS_SAAT = 48
+
 SEEN_FILE = "gorulen_haberler.json"
-MAX_SEEN = 800          # kayit dosyasi sonsuza kadar buyumesin
-SIM_ESIK = 0.82         # baslik benzerligi bu degerin ustundeyse "ayni haber"
+MAX_SEEN = 800
+SIM_ESIK = 0.82
 
 KATEGORI_EMOJI = {
     "kaza-asayis": "🚨",
@@ -56,8 +58,6 @@ KATEGORI_EMOJI = {
     "diger": "📰",
 }
 
-
-# ----------------- yardimci fonksiyonlar -----------------
 
 def load_seen():
     if os.path.exists(SEEN_FILE):
@@ -76,7 +76,7 @@ def save_seen(lst):
 
 def normalize_baslik(t):
     t = t.lower()
-    t = re.sub(r"\s*[-–|]\s*[^-–|]+$", "", t)        # " - Kaynak" sonekini at
+    t = re.sub(r"\s*[-–|]\s*[^-–|]+$", "", t)
     t = re.sub(r"[^0-9a-zçğıöşü ]", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t
@@ -84,6 +84,26 @@ def normalize_baslik(t):
 
 def thash(t):
     return "t:" + hashlib.md5(normalize_baslik(t).encode("utf-8")).hexdigest()[:16]
+
+
+def yayim_zamani(e):
+    """RSS girdisinin yayim zamanini (UTC saniye) dondurur; yoksa None."""
+    for key in ("published_parsed", "updated_parsed"):
+        t = e.get(key)
+        if t:
+            try:
+                return calendar.timegm(t)
+            except Exception:
+                pass
+    return None
+
+
+def yeterince_yeni(e):
+    """Haber son MAX_YAS_SAAT icinde mi yayimlanmis?"""
+    ts = yayim_zamani(e)
+    if ts is None:
+        return True  # tarih yoksa ele alma; dedup zaten tek sefer gonderir
+    return (time.time() - ts) <= MAX_YAS_SAAT * 3600
 
 
 def telegram(metin):
@@ -117,6 +137,8 @@ def fetch_all():
             title = e.get("title", "").strip()
             if not link or not title:
                 continue
+            if not yeterince_yeni(e):      # <-- eski haberleri burada eliyoruz
+                continue
             summary = re.sub("<[^>]+>", "", e.get("summary", "")).strip()
             src = ""
             if isinstance(e.get("source"), dict):
@@ -126,7 +148,6 @@ def fetch_all():
 
 
 def tekille(items):
-    """Ayni turdaki yakin-ayni basliklari teke indir."""
     kept, norms = [], []
     for it in items:
         n = normalize_baslik(it["title"])
@@ -138,7 +159,6 @@ def tekille(items):
 
 
 def gemini_siniflandir(items):
-    """Tum adaylari TEK Gemini cagrisinda degerlendirir. Hata olursa None."""
     if not GEMINI_API_KEY:
         return None
     liste = "\n".join(
@@ -178,7 +198,6 @@ def gemini_siniflandir(items):
 
 
 def kural_filtre(it):
-    """Gemini calismazsa devreye giren basit yedek filtre."""
     m = (it["title"] + " " + it["summary"]).lower()
     if "ladik" not in m:
         return False
@@ -198,8 +217,6 @@ def mesaj(it, karar):
     return f"{bas}\n{it['url']}"
 
 
-# ----------------- ana akis -----------------
-
 def main():
     if not TELEGRAM_TOKEN or not CHAT_ID:
         print("HATA: TELEGRAM_TOKEN / TELEGRAM_CHAT_ID secret eksik.")
@@ -217,17 +234,15 @@ def main():
     ilk_calisma = len(seen) == 0
     items = fetch_all()
 
-    # Ilk calismada eski haberleri toplu gondermeyiz, sadece kaydederiz
     if ilk_calisma:
         for it in items:
             mark(it)
         save_seen(seen_list)
         telegram("✅ Akıllı Ladik haber botu aktif. "
-                 "Haberler süzülüp, özetlenip buraya düşecek.")
+                 "Sadece yeni haberler süzülüp buraya düşecek.")
         print(f"Ilk calisma: {len(items)} haber kaydedildi (bildirim yok).")
         return
 
-    # Daha once gorulmemis adaylar
     aday = [it for it in items
             if it["url"] not in seen and thash(it["title"]) not in seen]
     aday = tekille(aday)
@@ -240,7 +255,6 @@ def main():
 
     idx_map = {}
     if kararlar is None:
-        # Yedek: kural filtresi
         print("Gemini devre disi; kural filtresine dusuldu.")
         for i, it in enumerate(aday):
             if kural_filtre(it):
@@ -254,7 +268,7 @@ def main():
 
     gonderilen = 0
     for i, it in enumerate(aday):
-        mark(it)  # alakasiz da olsa tekrar degerlendirmeyelim diye isaretle
+        mark(it)
         if i in idx_map:
             if telegram(mesaj(it, idx_map[i])):
                 gonderilen += 1
