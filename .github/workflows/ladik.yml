@@ -6,7 +6,7 @@ on:
   workflow_dispatch:            # elle calistirma butonu (test icin)
 
 permissions:
-  contents: write               # gorulen_haberler.json'i geri yazabilmek icin
+  contents: write
 
 concurrency:
   group: ladik-haber
@@ -17,10 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Repoyu indir
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Python kur
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -45,7 +45,12 @@ jobs:
           git add gorulen_haberler.json
           git commit -m "Gorulen haberler guncellendi"
           for i in 1 2 3 4 5; do
-            if git pull --rebase --autostash origin main && git push; then
+            # yarim kalmis birlestirme/rebase varsa temizle
+            git rebase --abort 2>/dev/null || true
+            git merge --abort 2>/dev/null || true
+            git fetch origin main
+            # uzak surumle birlestir; cakisma olursa KENDI surumumuzu tut
+            if git merge -X ours --no-edit origin/main && git push; then
               echo "Push basarili."
               exit 0
             fi
